@@ -1,13 +1,15 @@
 import torch
 from torchvision import datasets, transforms
 
-def train(model, train_loader, optimizer, criterion, epochs=10, val_loader=None, verbose=True):
+def train(model, train_loader, optimizer, criterion, epochs=10, val_loader=None, verbose=True, device="cpu", regression=False):
     model.train()
     for epoch in range(epochs):
         for batch_idx, (data, target) in enumerate(train_loader):
-            data, target = data.to(model.device), target.to(model.device)
+            data, target = data.to(device), target.to(device)
             optimizer.zero_grad()
             output = model(data)
+            if regression:
+                output = output.flatten()
             loss = criterion(output, target)
             loss.backward()
             optimizer.step()
@@ -17,24 +19,30 @@ def train(model, train_loader, optimizer, criterion, epochs=10, val_loader=None,
                     100. * batch_idx / len(train_loader), loss.item()))
         if val_loader is not None:
             print("Validation: ", end = "")
-            test(model, val_loader, criterion)
+            test(model, val_loader, criterion, device=device, regression=regression)
 
-def test(model, test_loader, criterion):
+def test(model, test_loader, criterion, device="cpu", regression=False):
     model.eval()
     test_loss = 0
     correct = 0
     with torch.no_grad():
         for data, target in test_loader:
-            data, target = data.to(model.device), target.to(model.device)
+            data, target = data.to(device), target.to(device)
             output = model(data)
+            if regression:
+                output = output.flatten()
             test_loss += criterion(output, target).item() # sum up batch loss
-            pred = output.argmax(dim=1, keepdim=True) # get the index of the max log-probability
-            correct += pred.eq(target.view_as(pred)).sum().item()
+            if not regression:
+                pred = output.argmax(dim=1, keepdim=True) # get the index of the max log-probability
+                correct += pred.eq(target.view_as(pred)).sum().item()
 
     test_loss /= len(test_loader.dataset)
     
-    print('Average loss: {:.4f}, Accuracy: {}/{} ({:.2f}%)'.format(test_loss, correct, len(test_loader.dataset),
-        100. * correct / len(test_loader.dataset)))
+    if regression:
+        print('Average loss: {:.4f}'.format(test_loss))
+    else:
+        print('Average loss: {:.4f}, Accuracy: {}/{} ({:.2f}%)'.format(test_loss, correct, len(test_loader.dataset),
+            100. * correct / len(test_loader.dataset)))
 
 """
 Create a class for toy datasets
@@ -42,7 +50,6 @@ Create a class for toy datasets
 class ToyData(torch.utils.data.Dataset):
     def __init__(self, input_dim, signal_dim, num_samples=1000, regression=False):
         self.X = torch.randn(num_samples, input_dim)
-        self.X = torch.cat((self.X, self.X), dim=1)
         self.multiplier = torch.randn(input_dim)
         self.multiplier = torch.cat((self.multiplier, self.multiplier), dim=0)
         self.input_dim = input_dim
@@ -59,7 +66,7 @@ class ToyData(torch.utils.data.Dataset):
 
     def compute_y(self):
         stop = self.window_index+self.signal_dim
-        y = torch.matmul(self.X[:,self.window_index:stop], self.multiplier[self.window_index:stop])
+        y = torch.matmul(torch.cat((self.X, self.X), dim=1)[:,self.window_index:stop], self.multiplier[self.window_index:stop])
         if not self.regression:
             y = y > 0
             self.y = y.long()

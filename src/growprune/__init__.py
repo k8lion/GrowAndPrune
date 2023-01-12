@@ -1,3 +1,3 @@
 from . import utilities
 
-from utilities import *
+from .utilities import *
