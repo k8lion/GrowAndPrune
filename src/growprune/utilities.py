@@ -1,7 +1,7 @@
 import torch
 from torchvision import datasets, transforms
 
-def train(model, train_loader, optimizer, criterion, epochs=10, val_loader=None, verbose=True, device="cpu", regression=False):
+def train(model, train_loader, optimizer, criterion, epochs=10, val_loader=None, verbose=False, val_verbose=True, device="cpu", regression=False):
     model.train()
     for epoch in range(epochs):
         for batch_idx, (data, target) in enumerate(train_loader):
@@ -18,11 +18,15 @@ def train(model, train_loader, optimizer, criterion, epochs=10, val_loader=None,
                     epoch, batch_idx * len(data), len(train_loader.dataset),
                     100. * batch_idx / len(train_loader), loss.item()))
         if val_loader is not None:
-            print("Validation: ", end = "")
-            test(model, val_loader, criterion, device=device, regression=regression)
+            if val_verbose: 
+                print("Validation: ", end = "")
+            test(model, val_loader, criterion, device=device, regression=regression, verbose=val_verbose)
 
-def test(model, test_loader, criterion, device="cpu", regression=False):
+def test(model, test_loader, criterion, device="cpu", regression=False, verbose=True, metrics=False):
     model.eval()
+    if metrics and hasattr(model, "activations"):
+        for key, value in model.activations.items():
+            model.activations[key] = torch.Tensor().to(device)
     test_loss = 0
     correct = 0
     with torch.no_grad():
@@ -38,11 +42,13 @@ def test(model, test_loader, criterion, device="cpu", regression=False):
 
     test_loss /= len(test_loader.dataset)
     
-    if regression:
-        print('Average loss: {:.4f}'.format(test_loss))
-    else:
-        print('Average loss: {:.4f}, Accuracy: {}/{} ({:.2f}%)'.format(test_loss, correct, len(test_loader.dataset),
-            100. * correct / len(test_loader.dataset)))
+    if verbose:
+        print('Average loss: {:.4f}'.format(test_loss), end="")
+        if not regression:
+            print(', Accuracy: {}/{} ({:.2f}%)'.format(correct, len(test_loader.dataset),
+                100. * correct / len(test_loader.dataset)), end="")
+        if not metrics:
+            print()
 
 """
 Create a class for toy datasets
@@ -76,7 +82,7 @@ class ToyData(torch.utils.data.Dataset):
     def shift_window(self, shift):
         self.window_index += shift
         if self.window_index > self.X.shape[1]:
-            self.window_index = 0
+            self.window_index -= self.X.shape[1]
         self.compute_y()
 
     def shift_distribution(self, multiplier=1.0, adder=0.0):
