@@ -3,6 +3,8 @@ from torchvision import datasets, transforms
 
 def train(model, train_loader, optimizer, criterion, epochs=10, val_loader=None, verbose=False, val_verbose=True, device="cpu", regression=False):
     model.train()
+    val_losses = []
+    val_accs = []
     for epoch in range(epochs):
         for batch_idx, (data, target) in enumerate(train_loader):
             data, target = data.to(device), target.to(device)
@@ -20,7 +22,10 @@ def train(model, train_loader, optimizer, criterion, epochs=10, val_loader=None,
         if val_loader is not None:
             if val_verbose: 
                 print("Validation: ", end = "")
-            test(model, val_loader, criterion, device=device, regression=regression, verbose=val_verbose)
+            loss, acc = test(model, val_loader, criterion, device=device, regression=regression, verbose=val_verbose)
+            val_losses.append(loss)
+            val_accs.append(acc)
+    return val_losses, val_accs
 
 def test(model, test_loader, criterion, device="cpu", regression=False, verbose=True, metrics=False):
     model.eval()
@@ -49,6 +54,8 @@ def test(model, test_loader, criterion, device="cpu", regression=False, verbose=
                 100. * correct / len(test_loader.dataset)), end="")
         if not metrics:
             print()
+    
+    return test_loss, correct/len(test_loader.dataset)
 
 """
 Create a class for toy datasets
@@ -101,7 +108,7 @@ def mnist_dataset():
 """
 Turn a dataset into train, val, and test split dataloaders
 """
-def split_dataset(X, y=None, X_test=None, y_test=None, val_size=0.1, test_size=0.1, batch_size=128):
+def split_dataset(X, y=None, X_test=None, y_test=None, val_size=0.1, test_size=0.1, batch_size=128, shuffle_val=False):
     if y is not None:
         dataset = torch.utils.data.TensorDataset(X, y)
     else:
@@ -111,10 +118,10 @@ def split_dataset(X, y=None, X_test=None, y_test=None, val_size=0.1, test_size=0
     elif y_test is not None:
         test_set = torch.utils.data.TensorDataset(X_test, y_test)
     else:
-        test_ste = X_test
+        test_set = X_test
     train_set, val_set = torch.utils.data.random_split(dataset, lengths=[int((1-val_size)*len(dataset)), int(val_size*len(dataset))])
     train_loader = torch.utils.data.DataLoader(train_set, batch_size=batch_size, shuffle=True)
-    val_loader = torch.utils.data.DataLoader(val_set, batch_size=batch_size, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(val_set, batch_size=batch_size)
+    val_loader = torch.utils.data.DataLoader(val_set, batch_size=batch_size, shuffle=shuffle_val)
+    test_loader = torch.utils.data.DataLoader(test_set, batch_size=batch_size)
     
     return train_loader, val_loader, test_loader
