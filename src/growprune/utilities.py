@@ -92,9 +92,10 @@ class ToyData(torch.utils.data.Dataset):
             self.window_index -= self.X.shape[1]
         self.compute_y()
 
-    def shift_distribution(self, multiplier=1.0, adder=0.0):
+    def shift_distribution(self, multiplier=1.0, adder=0.0, recompute_y=True):
         self.X = self.X * multiplier + adder
-        self.compute_y()
+        if recompute_y:
+            self.compute_y()
 
 
 def mnist_dataset():
