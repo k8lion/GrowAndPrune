@@ -1,10 +1,16 @@
 import torch
 from torchvision import datasets, transforms
+from collections import defaultdict
 
-def train(model, train_loader, optimizer, criterion, epochs=10, val_loader=None, verbose=False, val_verbose=True, device="cpu", regression=False):
+def train(model, train_loader, optimizer, criterion, epochs=10, val_loader=None, 
+          verbose=False, val_verbose=True, device="cpu", regression=False, val_acts = False):
     model.train()
     val_losses = []
     val_accs = []
+    if val_acts:
+        acts = defaultdict(list)
+    else:
+        acts = None
     for epoch in range(epochs):
         for batch_idx, (data, target) in enumerate(train_loader):
             data, target = data.to(device), target.to(device)
@@ -25,7 +31,10 @@ def train(model, train_loader, optimizer, criterion, epochs=10, val_loader=None,
             loss, acc = test(model, val_loader, criterion, device=device, regression=regression, verbose=val_verbose)
             val_losses.append(loss)
             val_accs.append(acc)
-    return val_losses, val_accs
+            if val_acts:
+                for key, value in model.activations.items():
+                    acts[key].append(value.cpu())
+    return val_losses, val_accs, acts
 
 def test(model, test_loader, criterion, device="cpu", regression=False, verbose=True, metrics=False):
     model.eval()
