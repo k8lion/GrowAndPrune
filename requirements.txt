@@ -1,3 +1,4 @@
+celluloid
 matplotlib
 numpy
 torch

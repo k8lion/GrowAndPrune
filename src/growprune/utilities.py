@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from torchvision import datasets, transforms
 from collections import defaultdict
@@ -70,21 +71,32 @@ def test(model, test_loader, criterion, device="cpu", regression=False, verbose=
 Create a class for toy datasets
 """
 class ToyData(torch.utils.data.Dataset):
-    def __init__(self, input_dim, signal_dim, num_samples=1000, regression=False):
-        self.X = torch.randn(num_samples, input_dim)
+    def __init__(self, input_dim, signal_dim, num_samples=1000, regression=False, masked=False):
+        self.X_base = torch.randn(num_samples, input_dim)
         self.multiplier = torch.randn(input_dim)
         self.multiplier = torch.cat((self.multiplier, self.multiplier), dim=0)
         self.input_dim = input_dim
         self.signal_dim = signal_dim
         self.window_index = 0
         self.regression = regression
+        self.masked = masked
+        self.compute_X()
         self.compute_y()
 
     def __len__(self):
-        return len(self.X)
+        return len(self.X_base)
 
     def __getitem__(self, idx):
         return self.X[idx], self.y[idx]
+
+    def compute_X(self):
+        self.X = self.X_base.clone()
+        if self.masked:
+            if self.window_index+self.signal_dim <= self.X.shape[1]:
+                self.X[:,0:self.window_index] = 0
+                self.X[:,self.window_index+self.signal_dim:] = 0
+            else:
+                self.X[:,self.window_index+self.signal_dim-self.X.shape[1]:self.window_index] = 0
 
     def compute_y(self):
         stop = self.window_index+self.signal_dim
@@ -94,15 +106,17 @@ class ToyData(torch.utils.data.Dataset):
             self.y = y.long()
         else:
             self.y = y
-    
+        
     def shift_window(self, shift):
         self.window_index += shift
-        if self.window_index > self.X.shape[1]:
-            self.window_index -= self.X.shape[1]
+        if self.window_index > self.X_base.shape[1]:
+            self.window_index -= self.X_base.shape[1]
+        self.compute_X()
         self.compute_y()
 
     def shift_distribution(self, multiplier=1.0, adder=0.0, recompute_y=True):
-        self.X = self.X * multiplier + adder
+        self.X_base = self.X_base * multiplier + adder
+        self.compute_X()
         if recompute_y:
             self.compute_y()
 
@@ -135,3 +149,42 @@ def split_dataset(X, y=None, X_test=None, y_test=None, val_size=0.1, test_size=0
     test_loader = torch.utils.data.DataLoader(test_set, batch_size=batch_size)
     
     return train_loader, val_loader, test_loader
+
+def get_swiss_rolls(n_samples=1000, noise_factor=0.9, tasks = 10):
+
+    t = np.sort(1.5 * np.pi * (1 + 2*np.random.uniform(size=n_samples)))
+    t2 = np.sort(1.5 * np.pi * (2/3 + 2*np.random.uniform(size=n_samples)))
+
+    x = t * np.cos(t)
+    y = t * np.sin(t)
+
+    x2 = t2 * np.cos(t2+np.pi/2)
+    y2 = t2 * np.sin(t2+np.pi/2)
+
+    X = np.vstack((x, y)).T
+    noise = noise_factor * np.random.random(size=(n_samples, 2))
+    X += noise
+    t = np.squeeze(t)
+
+    X2 = np.vstack((x2, y2)).T
+    noise2 = noise_factor * np.random.random(size=(n_samples, 2))
+    X2 += noise2
+    t2 = np.squeeze(t2)
+
+    k = tasks
+    X_ = np.array_split(X, k)
+    X2_ = np.array_split(X2, k)
+
+    data = [np.concatenate((X_[i], X2_[i])) for i in range(k)]
+    labels = [np.concatenate((np.zeros(len(X_[i])), np.ones(len(X2_[i])))).astype(int) for i in range(k)]
+
+    dataset = np.concatenate((X,X2))
+    xmin, xmax = dataset[:, 0].min() - 1, dataset[:, 0].max() + 1
+    ymin, ymax = dataset[:, 1].min() - 1, dataset[:, 1].max() + 1
+    steps = 100
+    x_span = np.linspace(xmin, xmax, steps)
+    y_span = np.linspace(ymin, ymax, steps)
+    xx, yy = np.meshgrid(x_span, y_span)
+    grid = torch.autograd.Variable(torch.from_numpy(np.c_[xx.ravel(), yy.ravel()]).float())
+
+    datasets = [split_dataset(torch.Tensor(data[i]), torch.Tensor(labels[i]).long(), val_size = 0.1, test_size = 0.1, batch_size = 16) for i in range(k)]
