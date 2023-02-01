@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from torchvision import datasets, transforms
 from collections import defaultdict
+import math
 
 def train(model, train_loader, optimizer, criterion, epochs=10, val_loader=None, 
           verbose=False, val_verbose=True, device="cpu", regression=False, val_acts = False):
@@ -52,7 +53,10 @@ def test(model, test_loader, criterion, device="cpu", regression=False, verbose=
                 output = output.flatten()
             test_loss += criterion(output, target).item() # sum up batch loss
             if not regression:
-                pred = output.argmax(dim=1, keepdim=True) # get the index of the max log-probability
+                if len(output.shape) == 2:
+                    pred = output.argmax(dim=1, keepdim=True) # get the index of the max log-probability
+                else:
+                    pred = output > 0
                 correct += pred.eq(target.view_as(pred)).sum().item()
 
     test_loss /= len(test_loader.dataset)
@@ -120,6 +124,21 @@ class ToyData(torch.utils.data.Dataset):
         if recompute_y:
             self.compute_y()
 
+class TransferToyData(torch.utils.data.Dataset):
+    def __init__(self, angle: float = 0, line: bool = True, num_samples: int = 1000):
+        self.angle = angle
+        self.line = line
+        self.X = 2*torch.rand(num_samples, 2) - 1
+        if self.line:
+            self.X[:,0] = 0
+        self.y = (self.X[:,1] > 0).float()
+        self.X = self.X @ torch.tensor([[math.cos(angle), -math.sin(angle)], [math.sin(angle), math.cos(angle)]])
+
+    def __len__(self):
+        return len(self.y)
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
 
 def mnist_dataset():
     dataset = datasets.MNIST('../data', train=True, download=True,
@@ -143,7 +162,7 @@ def split_dataset(X, y=None, X_test=None, y_test=None, val_size=0.1, test_size=0
         test_set = torch.utils.data.TensorDataset(X_test, y_test)
     else:
         test_set = X_test
-    train_set, val_set = torch.utils.data.random_split(dataset, lengths=[int((1-val_size)*len(dataset)), int(val_size*len(dataset))])
+    train_set, val_set = torch.utils.data.random_split(dataset, lengths=[int((1-(val_size/(1-test_size)))*len(dataset)), int((val_size/(1-test_size))*len(dataset))])
     train_loader = torch.utils.data.DataLoader(train_set, batch_size=batch_size, shuffle=True)
     val_loader = torch.utils.data.DataLoader(val_set, batch_size=batch_size, shuffle=shuffle_val)
     test_loader = torch.utils.data.DataLoader(test_set, batch_size=batch_size)
