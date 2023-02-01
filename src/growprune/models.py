@@ -6,11 +6,11 @@ from neurops import *
 
 
 class ModMLP(ModSequential):
-    def __init__(self, inputs, hidden, outputs):
+    def __init__(self, inputs, hidden, outputs, track_activations=False):
         super().__init__(
             ModLinear(inputs, hidden),
             ModLinear(hidden, outputs, nonlinearity=''),
-            track_activations=True,
+            track_activations=track_activations,
         )
 
     def forward(self, x):
