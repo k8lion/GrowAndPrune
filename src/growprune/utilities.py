@@ -3,6 +3,8 @@ import torch
 from torchvision import datasets, transforms
 from collections import defaultdict
 import math
+import h5py
+import os
 
 def train(model, train_loader, optimizer, criterion, epochs=10, val_loader=None, 
           verbose=False, val_verbose=True, device="cpu", regression=False, val_acts = False):
@@ -125,14 +127,34 @@ class ToyData(torch.utils.data.Dataset):
             self.compute_y()
 
 class TransferToyData(torch.utils.data.Dataset):
-    def __init__(self, angle: float = 0, line: bool = True, num_samples: int = 1000):
+    def __init__(self, angle: float = 0., x: float = 0., y: float = 0., line: bool = True, num_samples: int = 1000):
         self.angle = angle
         self.line = line
-        self.X = 2*torch.rand(num_samples, 2) - 1
+        #self.X = 2*torch.rand(num_samples, 2) - 1
+        self.X = torch.randn(num_samples, 2)
         if self.line:
             self.X[:,0] = 0
         self.y = (self.X[:,1] > 0).float()
         self.X = self.X @ torch.tensor([[math.cos(angle), -math.sin(angle)], [math.sin(angle), math.cos(angle)]])
+        self.X[:,0] += x
+        self.X[:,1] += y
+
+    def __len__(self):
+        return len(self.y)
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+class EffDimToyData(torch.utils.data.Dataset):
+    def __init__(self, features: int = 64, effdim: int = 32, outdim: int = -1, num_samples: int = 1000):
+        self.features = features
+        self.effdim = effdim
+        self.outdim = outdim
+        self.X = torch.randn(num_samples, features)
+        if effdim < features:
+            self.X[:,effdim:] = self.X[:,:effdim]@torch.randn(effdim, features-effdim)
+        response = torch.sum(self.X[:,outdim] if outdim >= 0 else self.X, dim=1)
+        self.y = (response > torch.sum(response)/len(response)).float()
 
     def __len__(self):
         return len(self.y)
@@ -207,3 +229,96 @@ def get_swiss_rolls(n_samples=1000, noise_factor=0.9, tasks = 10):
     grid = torch.autograd.Variable(torch.from_numpy(np.c_[xx.ravel(), yy.ravel()]).float())
 
     datasets = [split_dataset(torch.Tensor(data[i]), torch.Tensor(labels[i]).long(), val_size = 0.1, test_size = 0.1, batch_size = 16) for i in range(k)]
+
+
+class Galaxy10Dataset(torch.utils.data.Dataset):
+    def __init__(self, path_to_dir='~', transform=transforms.ToTensor(), mode="train"):
+        if mode == "train":
+            file = str(path_to_dir)+"/data/Galaxy10_DECals_trainval.h5"
+        else:
+            file = str(path_to_dir)+"/data/Galaxy10_DECals_test.h5"
+        
+        f = h5py.File(file, 'r')
+        labels, images = f['labels'], f['images']
+
+        self.x = images
+        self.y = torch.from_numpy(labels[:]).long()
+        self.num_samples = len(images)
+
+        self.transform = transform
+
+    def __getitem__(self, item):
+        img = self.x[item]
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, self.y[item]
+
+    def __len__(self):
+        return self.num_samples
+
+def get_galaxy10_dataloaders(path_to_dir = "~", validation_split=0.1, batch_size=32, small=True):
+    if batch_size < 0:
+        batch_size = 32 if small else 16
+    print(os.path.exists(str(path_to_dir)+"/data/Galaxy10_DECals_trainval.h5"), os.path.exists(str(path_to_dir)+"/data/Galaxy10_DECals.h5"))
+    if not os.path.exists(str(path_to_dir)+"/data/Galaxy10_DECals_trainval.h5"):
+        if os.path.exists(str(path_to_dir)+"/data/Galaxy10_DECals.h5"):
+            print("making dataset")
+            make_galaxy10_traintest(path_to_dir)
+        else:
+            print("No data found")
+            return None, None, None
+    totensor = transforms.ToTensor()
+    if small:
+        transform = transforms.Compose([
+            totensor,
+            transforms.Resize(64),
+            transforms.Normalize([0.16733793914318085, 0.16257789731025696, 0.1588301658630371], [0.1201716959476471, 0.11228285729885101, 0.10515376180410385]),
+        ])
+    else:
+        transform = transforms.Compose([
+            totensor,
+            transforms.Normalize([0.16683201, 0.16196689, 0.15829432], [0.12819551, 0.11757845, 0.11118137]),
+        ])
+    galaxy10_train = Galaxy10Dataset(mode='train', transform=transform, path_to_dir=path_to_dir)
+    shuffle_dataset = True
+    random_seed = 42
+    dataset_size = galaxy10_train.num_samples
+    indices = list(range(dataset_size))
+    split = int(np.floor(validation_split * dataset_size))
+    if shuffle_dataset:
+        np.random.seed(random_seed)
+        np.random.shuffle(indices)
+    train_indices, val_indices = indices[split:], indices[:split]
+
+    train_sampler = torch.utils.data.sampler.SubsetRandomSampler(train_indices)
+    valid_sampler = torch.utils.data.sampler.SubsetRandomSampler(val_indices)
+
+    train_loader = torch.utils.data.DataLoader(galaxy10_train, batch_size=batch_size, 
+                                            sampler=train_sampler)
+    validation_loader = torch.utils.data.DataLoader(galaxy10_train, batch_size=batch_size,
+                                                    sampler=valid_sampler)
+
+    galaxy10_test = Galaxy10Dataset(mode='test', transform=transform, path_to_dir=path_to_dir)
+    test_loader = torch.utils.data.DataLoader(galaxy10_test, batch_size=batch_size)
+
+    return train_loader, validation_loader, test_loader
+
+
+def make_galaxy10_traintest(path_to_dir = "..", test_split=0.1, seed=42):
+    np.random.seed(seed)
+    file = str(path_to_dir)+"/data/Galaxy10_DECals.h5"
+    f = h5py.File(file, 'r')
+    print(f.keys())
+    labels, images = f['ans'], f['images']
+    inds = np.arange(len(labels))
+    np.random.shuffle(inds)
+    split_ind = int(np.floor(test_split * len(inds)))
+    tv_inds, test_inds = sorted(inds[split_ind:]), sorted(inds[:split_ind])
+    tv_f = h5py.File(str(path_to_dir)+"/data/Galaxy10_DECals_trainval.h5", 'w')
+    tv_f.create_dataset('images', data=images[tv_inds,:,:,:])
+    tv_f.create_dataset('labels', data=labels[tv_inds])
+    tv_f.close()
+    test_f = h5py.File(str(path_to_dir)+"/data/Galaxy10_DECals_test.h5", 'w')
+    test_f.create_dataset('images', data=images[test_inds,:,:,:])
+    test_f.create_dataset('labels', data=labels[test_inds])
+    test_f.close()
