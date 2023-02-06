@@ -18,8 +18,6 @@ class ModMLP(ModSequential):
 
 
 class ModVGG11(ModSequential):
-    #https://pytorch.org/vision/stable/_modules/torchvision/models/vgg.html
-    #https://download.pytorch.org/models/vgg11-8a719046.pth
     def __init__(self, num_classes: int = 10, avgpooldim = 1):
         super().__init__(
             ModConv2d(in_channels=3, out_channels=64, kernel_size=3, padding=1, 
