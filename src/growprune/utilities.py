@@ -256,10 +256,10 @@ class Galaxy10Dataset(torch.utils.data.Dataset):
     def __len__(self):
         return self.num_samples
 
-def get_galaxy10_dataloaders(path_to_dir = "~", validation_split=0.1, batch_size=32, small=True):
+def get_galaxy10_dataloaders(path_to_dir = "~", validation_split=0.1, batch_size=-1, dim=224):
     if batch_size < 0:
-        batch_size = 32 if small else 16
-    print(os.path.exists(str(path_to_dir)+"/data/Galaxy10_DECals_trainval.h5"), os.path.exists(str(path_to_dir)+"/data/Galaxy10_DECals.h5"))
+        batch_size = 32 
+    #print(os.path.exists(str(path_to_dir)+"/data/Galaxy10_DECals_trainval.h5"), os.path.exists(str(path_to_dir)+"/data/Galaxy10_DECals.h5"))
     if not os.path.exists(str(path_to_dir)+"/data/Galaxy10_DECals_trainval.h5"):
         if os.path.exists(str(path_to_dir)+"/data/Galaxy10_DECals.h5"):
             print("making dataset")
@@ -268,15 +268,9 @@ def get_galaxy10_dataloaders(path_to_dir = "~", validation_split=0.1, batch_size
             print("No data found")
             return None, None, None
     totensor = transforms.ToTensor()
-    if small:
-        transform = transforms.Compose([
+    transform = transforms.Compose([
             totensor,
-            transforms.Resize(64),
-            transforms.Normalize([0.16733793914318085, 0.16257789731025696, 0.1588301658630371], [0.1201716959476471, 0.11228285729885101, 0.10515376180410385]),
-        ])
-    else:
-        transform = transforms.Compose([
-            totensor,
+            transforms.Resize(dim),
             transforms.Normalize([0.16683201, 0.16196689, 0.15829432], [0.12819551, 0.11757845, 0.11118137]),
         ])
     galaxy10_train = Galaxy10Dataset(mode='train', transform=transform, path_to_dir=path_to_dir)
