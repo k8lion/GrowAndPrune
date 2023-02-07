@@ -5,3 +5,4 @@ torch
 torchvision
 transformers
 h5py
+git+https://github.com/SuReLI/NeurOps.git#egg=neurops

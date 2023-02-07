@@ -1,13 +1,10 @@
 import sys
 import os
-sys.path.append(os.path.expanduser("~/repos/NeurOps/pytorch"))
-import numpy as np
 import torch
 from collections import OrderedDict
 import argparse
-
+import numpy as np
 from neurops import *
-
 from growprune import *
 
 def transfer(args):
@@ -63,4 +60,5 @@ if __name__ == "__main__":
     parser.add_argument('--learning_rate', type=float, default=3e-4, help='learning rate')
     parser.add_argument('--epochs', type=int, default=100, help='number of epochs')
     parser.add_argument('--batch_size', type=int, default=128, help='batch size')
+    parser.add_argument('--neurops_path', type=str, default="")
     transfer(args)
