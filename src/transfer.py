@@ -12,7 +12,7 @@ def transfer(args):
     if args.task == "galaxy10":
         limit = 15 if args.reset_linear else 19
         model = ModVGG11(num_classes=10, avgpooldim=7).to(device)
-        weights = torch.load("../../data/vgg11-8a719046.pth")
+        weights = torch.load(args.path+"/data/vgg11-8a719046.pth")
         renamed = OrderedDict()
         for i, (key, value) in enumerate(zip(model.state_dict(), weights.values())):
             if i <= limit:
@@ -22,7 +22,7 @@ def transfer(args):
         model.load_state_dict(renamed)
         optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
         criterion = torch.nn.CrossEntropyLoss()
-        train_loader, validation_loader, test_loader = get_galaxy10_dataloaders(path_to_dir="../..", batch_size=args.batch_size, dim=224)
+        train_loader, validation_loader, test_loader = get_galaxy10_dataloaders(path_to_dir=args.path, batch_size=args.batch_size, dim=224)
 
     test(model, train_loader, criterion, device=device)
     init_score = np.zeros(len(model.activations))
@@ -60,5 +60,5 @@ if __name__ == "__main__":
     parser.add_argument('--learning_rate', type=float, default=3e-4, help='learning rate')
     parser.add_argument('--epochs', type=int, default=100, help='number of epochs')
     parser.add_argument('--batch_size', type=int, default=128, help='batch size')
-    parser.add_argument('--neurops_path', type=str, default="")
+    parser.add_argument('--path', type=str, default="..")
     transfer(parser.parse_args())
