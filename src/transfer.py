@@ -1,64 +1,382 @@
-import sys
-import os
 import torch
 from collections import OrderedDict
 import argparse
 import numpy as np
+import pickle
+import copy
+import math
 from neurops import *
 from growprune import *
 
+g10small_thresholds=[1.0]*10
+g10small_thresholds[-1]=4066.0/4096
+g10_thresholds=[1.0]*10
+g10_thresholds[-1]=4086.0/4096
+woof2net = [155, 159, 162, 167, 182, 193, 207, 229, 258, 273]
+nette2net = [0, 217, 482, 491, 497, 566, 569, 571, 574, 701]
+
 def transfer(args):
+    if "static" in args.prune_score:
+        args.no_prune = True
+        args.no_grow = True
+    if "surgical" in args.prune_score:
+        args.surgical = True
+    if "reinitdense" in args.prune_score:
+        args.reset_linear = True
+    if args.pruning_threshold == -1:
+        args.pruning_threshold = 0.8 if args.old else 0.97
+    if args.growing_threshold == -1:
+        args.growing_threshold = 0.98 if args.old else 1.03
+    if "tstoy" in args.task:
+        args.no_pretrain=True
+        args.recompute_stats=True
+    for arg in sorted(vars(args)):
+        print(arg, getattr(args, arg))
+    filename = str(args.path) +'/out/'+args.task+"_"+args.name+'.pkl'
+    print(filename)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    if args.task == "galaxy10":
-        limit = 15 if args.reset_linear else 19
-        model = ModVGG11(num_classes=10, avgpooldim=7).to(device)
-        weights = torch.load(args.path+"/data/vgg11-8a719046.pth")
-        renamed = OrderedDict()
-        for i, (key, value) in enumerate(zip(model.state_dict(), weights.values())):
-            if i <= limit:
-                renamed[key] = value
-            else:
-                renamed[key] = model.state_dict()[key]
-        model.load_state_dict(renamed)
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    if "galaxy10" in args.task:
+        if args.vggnineteen:
+            model = ModVGG19(num_classes=10, avgpooldim=1 if "small" in args.task else 7).to(device)
+        else:
+            model = ModVGG11(num_classes=10, avgpooldim=1 if "small" in args.task else 7).to(device)
+        limit = len(model.state_dict())-4 if args.reset_linear or "small" in args.task else len(model.state_dict())
+        if not args.no_pretrain:
+            weights = torch.load(args.path+"/data/"+model.weights_file)
+            renamed = OrderedDict()
+            for i, (key, value) in enumerate(zip(model.state_dict(), weights.values())):
+                if i <= limit and value.shape == model.state_dict()[key].shape:
+                    print("loading pretrained weights for "+key)
+                    renamed[key] = value
+                else:
+                    print("not loading weights for "+key)
+                    renamed[key] = model.state_dict()[key]
+            model.load_state_dict(renamed)
         criterion = torch.nn.CrossEntropyLoss()
-        train_loader, validation_loader, test_loader = get_galaxy10_dataloaders(path_to_dir=args.path, batch_size=args.batch_size, dim=224)
-
-    test(model, train_loader, criterion, device=device)
-    init_score = np.zeros(len(model.activations))
+        input = torch.zeros(1,3,64 if "small" in args.task else 224,64 if "small" in args.task else 224)
+        train_loader, validation_loader, test_loader = get_galaxy10_dataloaders(path_to_dir=args.path, batch_size=args.batch_size, 
+                                                                                dim=64 if "small" in args.task else 224, random_seed=args.seed)
+        if args.recompute_stats:
+            validation_loader_ = get_imagenet_dataloader(path_to_dir=args.path, batch_size=args.batch_size,
+                                                         dim=64 if "small" in args.task else 224)
+    elif "imagenet" in args.task or "imagewoof" in args.task:
+        if args.vggnineteen:
+            model = ModVGG19(num_classes=10 if ("woof" in args.task or "nette" in args.task) else 1000, avgpooldim=1 if "small" in args.task else 7).to(device)
+        else:
+            model = ModVGG11(num_classes=10 if ("woof" in args.task or "nette" in args.task) else 1000, avgpooldim=1 if "small" in args.task else 7).to(device)
+        limit = len(model.state_dict())-4 if args.reset_linear or "small" in args.task else len(model.state_dict())
+        if not args.no_pretrain:
+            weights = torch.load(args.path+"/data/"+model.weights_file)
+            renamed = OrderedDict()
+            for i, (key, value) in enumerate(zip(model.state_dict(), weights.values())):
+                if i <= limit and value.shape == model.state_dict()[key].shape:
+                    print("loading pretrained weights for "+key)
+                    renamed[key] = value
+                elif not args.reset_linear and "reinit" not in args.prune_score and("woof" in args.task or "nette" in args.task):
+                    print("loading sliced pretrained weights for "+key)
+                    indices = woof2net if "imagewoof" in args.task else nette2net
+                    renamed[key] = value[indices]
+                else:
+                    print("not loading weights for "+key)
+                    renamed[key] = model.state_dict()[key]
+            model.load_state_dict(renamed)
+        criterion = torch.nn.CrossEntropyLoss()
+        input = torch.zeros(1,3,64 if "small" in args.task else 224,64 if "small" in args.task else 224)
+        if "imagenette" in args.task:
+            train_loader, validation_loader, test_loader = get_imagenette_dataloaders(path_to_dir=args.path, batch_size=args.batch_size, woof=False,
+                                                                                    dim=64 if "small" in args.task else 224)
+        elif "imagewoof" in args.task:
+            train_loader, validation_loader, test_loader = get_imagenette_dataloaders(path_to_dir=args.path, batch_size=args.batch_size, woof=True,
+                                                                                    dim=64 if "small" in args.task else 224)
+        elif "imagenet_c" in args.task:
+            train_loader, validation_loader, test_loader = get_balanced_imagenet_c_dataloaders(path_to_dir=args.path, batch_size=args.batch_size,
+                                                                                    dim=64 if "small" in args.task else 224, corruption=args.corruption, 
+                                                                                    severity=args.severity)
+            print("Using balanced Imagenet-C dataloader with corruption "+args.corruption+" and severity"+str(args.severity))
+            print("Number of training samples: "+str(len(train_loader.dataset)))
+            print("Number of validation samples: "+str(len(validation_loader.dataset)))
+            print("Number of test samples: "+str(len(test_loader.dataset)))
+        else:
+            if "imagenetval" not in args.task:
+                print("Task not recognized. Defaulting to imagenetval.")
+            validation_loader = get_imagenet_dataloader(path_to_dir=args.path, batch_size=args.batch_size,
+                                                            dim=64 if "small" in args.task else 224)
+            train_loader = validation_loader
+            test_loader = validation_loader
+        if args.recompute_stats:
+            if "imagenetval" in args.task:
+                validation_loader_ = validation_loader
+            else:
+                validation_loader_ = get_imagenet_dataloader(path_to_dir=args.path, batch_size=args.batch_size,
+                                                            dim=64 if "small" in args.task else 224)
+    elif "effdimtoy" in args.task:
+        indim = 64
+        hiddendim = 64
+        outdim = 1
+        effdim = 32
+        model = ModMLP(indim,hiddendim,outdim,3).to(device)
+        criterion = torch.nn.BCEWithLogitsLoss()
+        basedata = EffDimToyData(effdim=effdim)
+        train_loader_, validation_loader_, test_loader_ = split_dataset(basedata, val_size=0.1, test_size=0.1, batch_size=32)
+        train_loader, validation_loader, test_loader = copy.deepcopy(train_loader_), copy.deepcopy(validation_loader_), copy.deepcopy(test_loader_)
+        train_loader.dataset.dataset.dataset.X += 1.0
+        validation_loader.dataset.dataset.dataset.X += 1.0
+        test_loader.dataset.dataset.X += 1.0
+        input = torch.zeros(1,indim)
+    elif "transfertoy" in args.task:
+        model = ModMLP(16,32 if args.no_grow else 2,1,50).to(device)
+        criterion = torch.nn.BCEWithLogitsLoss()
+        basedata = TransferToyData2(weight=1.0)
+        train_loader_, validation_loader_, test_loader_ = split_dataset(basedata, val_size=0.1, test_size=0.1, batch_size=32)
+        train_loader, validation_loader, test_loader = copy.deepcopy(train_loader_), copy.deepcopy(validation_loader_), copy.deepcopy(test_loader_)
+        train_loader.dataset.dataset.dataset.reweight(0, recomputey=True)
+        validation_loader.dataset.dataset.dataset.reweight(0, recomputey=True)
+        test_loader.dataset.dataset.reweight(0, recomputey=True)
+        input = torch.zeros(1,16)
+    elif "tstoy" in args.task:
+        indim = 2
+        hiddendim = 100
+        outdim = 1
+        reset = 100
+        model = ModMLP(indim,hiddendim,outdim,5).to(device)
+        criterion = torch.nn.MSELoss()
+        basedata = TSToyData(model, reset=reset, num_dim=indim, hidden_dim=hiddendim)
+        train_loader, validation_loader, test_loader = split_dataset(basedata, val_size=0.1, test_size=0.1, batch_size=32)
+        validation_loader_ = validation_loader
+        input = torch.zeros(1,indim)
+    input = input.to(device)
+    if args.surgical:
+        #use layerwise optimizer
+        optimizer = torch.optim.Adam([{'params': model[layer].parameters(), 'lr': args.learning_rate} for layer in range(len(model))], lr=args.learning_rate, weight_decay=args.weight_decay)
+        layer_weights = [0 for layer, _ in model.named_parameters() if 'bn' not in layer]
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    history = {'args': args,
+               'widths': {str(layer): [model[layer].width(masked="toy" in args.task)] for layer in range(len(model))},
+               'pruned': {str(layer): [] for layer in range(len(model))},
+               'grown': {str(layer): [] for layer in range(len(model))},
+               'scores': {str(layer): [] for layer in range(len(model))},
+               'neuron_scores': {str(layer): [] for layer in range(len(model))},
+               'svd_scores' : {str(layer): np.zeros((0,model[layer].width())) for layer in range(len(model))},
+               'corr_scores' : {str(layer): np.zeros((0,model[layer].width()))  for layer in range(len(model))},
+               'actvar_scores' : {str(layer): np.zeros((0,model[layer].width()))  for layer in range(len(model))},
+               'weight_scores' : {str(layer): np.zeros((0,model[layer].width()))  for layer in range(len(model))},
+               'apoz_scores' : {str(layer): np.zeros((0,model[layer].width()))  for layer in range(len(model))},
+               'dropcorr_scores' : {str(layer): np.zeros((0,model[layer].width()))  for layer in range(len(model))},
+               'recon_scores' : {str(layer): np.zeros((0,model[layer].width()))  for layer in range(len(model))},
+               'train': {'loss': [], 
+                         'accuracy': [], 
+                         'batchloss': []},
+               'widthsteps': [0],
+               'pre-steps': [],
+               'pre-train validation' : {'loss': [], 
+                                         'accuracy': []},
+               'post-train validation' : {'loss': [], 
+                                         'accuracy': []},
+               'paramcount': [model.parameter_count()], 
+               'flops': [model.FLOPs_count(input, verbose=True)],
+    }
+    if "toy" in args.task and not args.no_pretrain:
+        pre_iterations = 0
+        for _ in range(15):
+            val_losses, val_accs, _ = train(model, train_loader_, torch.optim.Adam(model.parameters(), lr=args.learning_rate), criterion, iterations=args.total_iters//10, device=device, verbose=False, val_acts=True, regression="tstoy" in args.task)
+            history["pre-steps"].insert(0, pre_iterations)
+            pre_iterations -= args.total_iters//10
+            loss, acc = test(model, validation_loader_, criterion, device=device, verbose=True)
+            history['post-train validation']['loss'].append(loss)
+            history['post-train validation']['accuracy'].append(acc)
+            if (args.no_grow and "toy" in args.task):
+                for i in range(len(model)-1):
+                    svd_scores = svd_score(model.activations[str(i)])
+                    corr_scores = correlation_score(model.activations[str(i)])
+                    actvar_scores = activation_variance(model.activations[str(i)])
+                    weight_scores = weight_sum(model[i].weight)
+                    apoz_scores = apoz_score(model.activations[str(i)])
+                    dropcorr_scores = dropped_corr_score(model.activations[str(i)])
+                    recon_scores = reconstruction_score(model.activations[str(i)])
+                    history['svd_scores'][str(i)] = np.concatenate((history['svd_scores'][str(i)], np.expand_dims(svd_scores.cpu().detach().numpy(), 0)), axis=0)
+                    history['corr_scores'][str(i)] = np.concatenate((history['corr_scores'][str(i)], np.expand_dims(corr_scores.cpu().detach().numpy(), 0)), axis=0)
+                    history['actvar_scores'][str(i)] = np.concatenate((history['actvar_scores'][str(i)], np.expand_dims(actvar_scores.cpu().detach().numpy(), 0)), axis=0)
+                    history['weight_scores'][str(i)] = np.concatenate((history['weight_scores'][str(i)], np.expand_dims(weight_scores.cpu().detach().numpy(), 0)), axis=0)
+                    history['apoz_scores'][str(i)] = np.concatenate((history['apoz_scores'][str(i)], np.expand_dims(apoz_scores.cpu().detach().numpy(), 0)), axis=0)
+                    history['dropcorr_scores'][str(i)] = np.concatenate((history['dropcorr_scores'][str(i)], np.expand_dims(dropcorr_scores.cpu().detach().numpy(), 0)), axis=0)
+                    history['recon_scores'][str(i)] = np.concatenate((history['recon_scores'][str(i)], np.expand_dims(recon_scores.cpu().detach().numpy(), 0)), axis=0)
+    elif args.recompute_stats:
+        test(model, validation_loader_, criterion, device=device, act_only=True)
+    threshold_score = np.zeros(len(model))
     for i in range(len(model)-1):
-        tensor = model.activations[str(i)]
-        print(torch.transpose(torch.transpose(tensor, 0, 1).reshape(tensor.shape[1], -1), 0, 1).shape)
-        init_score[i] = effective_rank(model.activations[str(i)], limit_ratio = 10)
-        print(f"Layer {i} has effective rank {init_score[i]}")
+        #tensor = model.activations[str(i)]
+        #print(torch.transpose(torch.transpose(tensor, 0, 1).reshape(tensor.shape[1], -1), 0, 1).shape)
+        if args.recompute_stats or "toy" in args.task:
+            threshold_score[i] = effective_rank(model.activations[str(i)], limit_ratio = 10)/model[i].width(masked="toy" in args.task)
+        elif "galaxy10" in args.task:
+            threshold_score[i] = g10small_thresholds[i] if "small" in args.task else g10_thresholds[i]
+        else:
+            threshold_score[i] = 1.0
+        width=model[i].width(masked="toy" in args.task)
+        print(f"Layer {i} has effective rank {int(threshold_score[i]*width)}/{width} on previous distribution")
+        history["scores"][str(i)].append(int(threshold_score[i]*model[i].width(masked="toy" in args.task)))
+    iterations = 0
+    arch_changed = True
+    print("begin transfer")
+    cycles = int(args.total_iters/args.gp_iters)
+    if not args.train_first:
+        cycles = cycles + 1 
+        test(model, train_loader, criterion, device=device, act_only=True, regression="tstoy" in args.task)
+    for gpcycle in range(cycles):
+        if arch_changed:
+            loss, acc = test(model, validation_loader, criterion, device=device, regression="tstoy" in args.task)
+            for i in range(len(model)-1):
+                if threshold_score[i] < 0:
+                    threshold_score[i] =  effective_rank(model.activations[str(i)], limit_ratio = 3 if "toy" not in args.task else -1)/model[i].width(masked="toy" in args.task)
+        else:
+            loss = history['post-train validation']['loss'][-1]
+            acc = history['post-train validation']['accuracy'][-1]
+        history['pre-train validation']['loss'].append(loss)
+        history['pre-train validation']['accuracy'].append(acc)
+        if (args.no_grow and "toy" in args.task) and gpcycle==0:
+            svd_scores = svd_score(model.activations[str(i)])
+            corr_scores = correlation_score(model.activations[str(i)])
+            actvar_scores = activation_variance(model.activations[str(i)])
+            weight_scores = weight_sum(model[i].weight)
+            apoz_scores = apoz_score(model.activations[str(i)])
+            dropcorr_scores = dropped_corr_score(model.activations[str(i)])
+            recon_scores = reconstruction_score(model.activations[str(i)])
+            history['svd_scores'][str(i)] = np.concatenate((history['svd_scores'][str(i)], np.expand_dims(svd_scores.cpu().detach().numpy(), 0)), axis=0)
+            history['corr_scores'][str(i)] = np.concatenate((history['corr_scores'][str(i)], np.expand_dims(corr_scores.cpu().detach().numpy(), 0)), axis=0)
+            history['actvar_scores'][str(i)] = np.concatenate((history['actvar_scores'][str(i)], np.expand_dims(actvar_scores.cpu().detach().numpy(), 0)), axis=0)
+            history['weight_scores'][str(i)] = np.concatenate((history['weight_scores'][str(i)], np.expand_dims(weight_scores.cpu().detach().numpy(), 0)), axis=0)
+            history['apoz_scores'][str(i)] = np.concatenate((history['apoz_scores'][str(i)], np.expand_dims(apoz_scores.cpu().detach().numpy(), 0)), axis=0)
+            history['dropcorr_scores'][str(i)] = np.concatenate((history['dropcorr_scores'][str(i)], np.expand_dims(dropcorr_scores.cpu().detach().numpy(), 0)), axis=0)
+            history['recon_scores'][str(i)] = np.concatenate((history['recon_scores'][str(i)], np.expand_dims(recon_scores.cpu().detach().numpy(), 0)), axis=0)
+        if not args.train_first and gpcycle == 0:
+            val_losses, val_accs, _ = train(model, train_loader, optimizer, criterion, iterations=0, val_loader=validation_loader, device=device, verbose=True, regression="tstoy" in args.task)
+        else:
+            if args.surgical:
+                optimizer = perform_surgery(optimizer, model, train_loader, criterion, layer_weights, device)
+            val_losses, val_accs, _ = train(model, train_loader, optimizer, criterion, iterations=args.gp_iters, val_loader=validation_loader, device=device, verbose=True, regression="tstoy" in args.task)
+            iterations += args.gp_iters
+        history['post-train validation']['loss'].extend(val_losses)
+        history['post-train validation']['accuracy'].extend(val_accs)
+        arch_changed = False
+        for i in range(len(model)-1):  
+            max_rank = model[i].width(masked="toy" in args.task)
+            score = effective_rank(model.activations[str(i)], limit_ratio = 3 if "toy" not in args.task else -1)
+            print("Layer {} width: {}, score: {}<{:.3f}?".format(i, max_rank, score.item(), args.pruning_threshold*threshold_score[i]*max_rank), end=" ")
+            if (args.no_grow and "toy" in args.task):
+                svd_scores = svd_score(model.activations[str(i)], limit_ratio = 3 if "toy" not in args.task else -1)
+                corr_scores = correlation_score(model.activations[str(i)])
+                actvar_scores = activation_variance(model.activations[str(i)])
+                weight_scores = weight_sum(model[i].weight, p=2)
+                apoz_scores = apoz_score(model.activations[str(i)])
+                dropcorr_scores = dropped_corr_score(model.activations[str(i)])
+                recon_scores = reconstruction_score(model.activations[str(i)], limit_ratio = 3 if "toy" not in args.task else -1)
+                history['svd_scores'][str(i)] = np.concatenate((history['svd_scores'][str(i)], np.expand_dims(svd_scores.cpu().detach().numpy(), 0)), axis=0)
+                history['corr_scores'][str(i)] = np.concatenate((history['corr_scores'][str(i)], np.expand_dims(corr_scores.cpu().detach().numpy(), 0)), axis=0)
+                history['actvar_scores'][str(i)] = np.concatenate((history['actvar_scores'][str(i)], np.expand_dims(actvar_scores.cpu().detach().numpy(), 0)), axis=0)
+                history['weight_scores'][str(i)] = np.concatenate((history['weight_scores'][str(i)], np.expand_dims(weight_scores.cpu().detach().numpy(), 0)), axis=0)
+                history['apoz_scores'][str(i)] = np.concatenate((history['apoz_scores'][str(i)], np.expand_dims(apoz_scores.cpu().detach().numpy(), 0)), axis=0)
+                history['dropcorr_scores'][str(i)] = np.concatenate((history['dropcorr_scores'][str(i)], np.expand_dims(dropcorr_scores.cpu().detach().numpy(), 0)), axis=0)
+                history['recon_scores'][str(i)] = np.concatenate((history['recon_scores'][str(i)], np.expand_dims(recon_scores.cpu().detach().numpy(), 0)), axis=0)
+            num_to_prune, to_add = 0, 0
+            if not args.no_prune:
+                #num_to_prune = min(max(int(args.pruning_threshold*threshold_score[i]*max_rank-score), 0), int(0.5*max_rank))
+                num_to_prune = max(int(args.pruning_threshold*threshold_score[i]*max_rank-score), 0)
+                if isinstance(model[i], nn.Linear) and max_rank - num_to_prune < model.num_classes:
+                    num_to_prune = max_rank - model.num_classes
+                to_prune = []
+                if num_to_prune > 0 or "toy" in args.task or args.prune_score == "imp":
+                    if args.prune_score == "apoz":
+                        scores = apoz_score(model.activations[str(i)])
+                        to_prune = np.argsort(scores.cpu().detach().numpy())[-num_to_prune:]
+                    elif args.prune_score == "actvar":
+                        scores = activation_variance(model.activations[str(i)])
+                        to_prune = np.argsort(scores.cpu().detach().numpy())[:num_to_prune]
+                    elif args.prune_score == "recon":
+                        scores = reconstruction_score(model.activations[str(i)], limit_ratio = 3 if "toy" not in args.task else -1)
+                        to_prune = np.argsort(scores.cpu().detach().numpy())[:num_to_prune]
+                    elif "corr_greedy" in args.prune_score:
+                        to_prune = corr_greedy_prune(model.activations[str(i)], num_to_prune, device=device)
+                    else:
+                        scores = weight_sum(model[i].weight, p=2)
+                        to_prune = np.argsort(scores.cpu().detach().numpy())[:num_to_prune]
 
-    for epoch in range(args.epochs):
-        test(model, validation_loader, criterion, device=device)
-        train(model, train_loader, optimizer, criterion, epochs=1, val_loader=validation_loader, device=device)
-        for i in range(len(model)-1):
-            max_rank = model[i].out_features if i > model.conversion_layer else model[i].out_channels
-            score = effective_rank(model.activations[str(i)], limit_ratio = 100)
-            num_to_prune = max(int(0.9*init_score[i])-score, 0)
-            scores = svd_score(model.activations[str(i)], limit_ratio = 100)
-            to_prune = np.argsort(scores.cpu().detach().numpy())[:num_to_prune]
-            to_add = max(score-int(0.97*init_score[i]), 0)
-            print("Layer {} score: {}/{}, neurons to prune: {}, # neurons to add: {}".format(i, score, max_rank, to_prune, to_add))
-            model.prune(i, to_prune, optimizer=optimizer)
-            model.grow(i, to_add, fanin_weights="iterative_orthogonalization", 
-                                optimizer=optimizer)
+                    if "toy" in args.task:
+                        to_prune = [neuron for neuron in to_prune if model[i].mask_vector[neuron] > 0]
 
+                    if "corr_greedy" not in args.prune_score:
+                        history['neuron_scores'][str(i)].append(scores.cpu().detach().numpy())
 
+                    if "toy" in args.task:
+                        model.mask(i, to_prune)
+                        print("Masked neurons {}".format(to_prune), end=" ")
+                    else:
+                        before = model[i].width(masked="toy" in args.task)
+                        model.prune(i, to_prune, optimizer=optimizer)
+                        print("Pruned {} neurons".format(before-model[i].width(masked="toy" in args.task)), end=" ")
+                    #test(model, train_loader, criterion, iterations=model[i+1].width(masked="toy" in args.task)*2, device=device, act_only=True, layer_index=i+1) #refill activations
+                    arch_changed = True
+                    score = effective_rank(model.activations[str(i)], limit_ratio = 3 if "toy" not in args.task else -1)
+                #print("Neurons to prune: {}".format(to_prune), end=" ")
+                history['pruned'][str(i)].append(num_to_prune)
+            if not args.no_grow:
+                grow_threshold = args.growing_threshold*threshold_score[i] #min(args.growing_threshold*threshold_score[i], 0.95)
+                print("score: {}>{:.3f}?".format(score.item(), grow_threshold*max_rank), end=" ")
+                to_add = max(int(score-grow_threshold*max_rank), 0)
+                print("# neurons to add: {}".format(to_add), end=" ")
+                if to_add > 0:
+                    model.grow(i, to_add, fanin_weights="north_select", 
+                                    optimizer=optimizer)
+                    arch_changed = True
+                history['grown'][str(i)].append(to_add)
+            if not args.old and (num_to_prune > 0 or to_add > 0):
+                #threshold_score[i] = score/max_rank
+                threshold_score[i] = -1
+            print()
+            history['widths'][str(i)].append(int(model[i].width(masked="toy" in args.task)))
+            history['scores'][str(i)].append(score.item())
+            if args.old and score > threshold_score[i]*max_rank:
+                threshold_score[i] = score/max_rank
+        #model.clear_activations()
+        history['paramcount'].append(model.parameter_count())
+        history['flops'].append(model.FLOPs_count(input))
+        history['widthsteps'].append(iterations)
+        with open(filename, 'wb') as f:
+            pickle.dump(history, f)
+    model.FLOPs_count(input, verbose=True)
+    _, test_acc = test(model, test_loader, criterion, verbose=False, device=device)
+    history['test'] = test_acc
+    with open(filename, 'wb') as f:
+        pickle.dump(history, f)
+    return history['post-train validation']['accuracy'][-1]
 
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Run diffentiable equivariance-aware NAS')
+    parser = argparse.ArgumentParser(description='Run grow and prune')
     parser.add_argument('--task', "-t", type=str, default="galaxy10", help='task')
     parser.add_argument('--reset_linear', action='store_true', default=False, help='start linear layers w/ random init')
-    parser.add_argument('--pruning_threshold', type=float, default=0.9, help='pruning threshold')
-    parser.add_argument('--growing_threshold', type=float, default=0.97, help='growing threshold')
+    parser.add_argument('--pruning_threshold', type=float, default=-1, help='pruning threshold')
+    parser.add_argument('--growing_threshold', type=float, default=-1, help='growing threshold')
     parser.add_argument('--learning_rate', type=float, default=3e-4, help='learning rate')
-    parser.add_argument('--epochs', type=int, default=100, help='number of epochs')
-    parser.add_argument('--batch_size', type=int, default=128, help='batch size')
-    parser.add_argument('--path', type=str, default="..")
+    parser.add_argument('--weight_decay', type=float, default=1e-3, help='weight decay')
+    parser.add_argument('--total_iters', type=int, default=1000, help='total number of iterations')
+    parser.add_argument('--gp_iters', type=float, default=50, help='number of iterations between growing/pruning')
+    parser.add_argument('--batch_size', type=int, default=64, help='batch size')
+    parser.add_argument('--path', type=str, default="..", help="path for storing data and outputs")
+    parser.add_argument('--name', "-n", type=str, default="test", help='name of experiment')
+    parser.add_argument('--no_grow', action='store_true', default=False, help='turn off growing')
+    parser.add_argument('--no_prune', action='store_true', default=False, help='turn off pruning')
+    parser.add_argument('--no_pretrain', action='store_true', default=False, help='turn off pretraining')
+    parser.add_argument('--prune_score', type=str, default="corr_greedy", help="pruning strategy")
+    parser.add_argument('--seed', type=int, default=42, help='random seed')
+    parser.add_argument('--recompute_stats', action='store_true', default=False, help='recompute dataset statistics')
+    parser.add_argument('--old', action='store_true', default=False, help='use old NORTH* scheduling')
+    parser.add_argument('--train_first', action='store_true', default=False, help='do cycle of training before g&p')
+    parser.add_argument('--surgical', action='store_true', default=False, help='use surgical fine-tuning (Lee & Chen et al., 2023)')
+    parser.add_argument('--corruption', type=str, default="contrast", help='type of corruption for imagenet-c')
+    parser.add_argument('--severity', type=str, default="1", help='level of corruption for imagenet-c')
+    parser.add_argument('--vggnineteen', action='store_true', default=False, help='use vgg19 instead of vgg11')
     transfer(parser.parse_args())
